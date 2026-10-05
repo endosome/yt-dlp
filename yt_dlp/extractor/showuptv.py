@@ -114,6 +114,8 @@ class ShowupTvIE(InfoExtractor):
             }),
         } for stream in subscription.get('streamList') or [] if stream.get('streamKey')]
 
+        # Usernames are case-insensitive in URLs; use the canonical form from the page for the IDs
+        username = traverse_obj(broadcast, ('host', 'username', {str})) or username
         uploader = traverse_obj(broadcast_data, ('profile', 'about', 'name', {str.strip})) or username
         return {
             'id': username,
