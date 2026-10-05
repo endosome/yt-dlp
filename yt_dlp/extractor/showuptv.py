@@ -98,6 +98,9 @@ class ShowupTvIE(InfoExtractor):
             'url': ws_url,
             'ext': 'mp4',
             'protocol': 'showup_live',
+            # The handshake only advertises H.264 and AAC, which is all that has been observed
+            'vcodec': 'avc1',
+            'acodec': 'mp4a.40.2',
             'downloader_options': {
                 'stream_key': stream['streamKey'],
                 'subscription_key': alias_stream_key,
