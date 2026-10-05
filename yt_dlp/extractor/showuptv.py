@@ -77,14 +77,16 @@ class ShowupTvIE(InfoExtractor):
 
         # Subscribing only lists the available qualities; the downloader opens its own connection
         subscription = ws_url = None
-        for edge in traverse_obj(page_props, ('serverData', 'streamServers', 'EDGE', lambda _, v: v['address'])):
-            ws_url = f'wss://{edge["address"]}/storm/v2/{edge.get("appName") or "live"}'
+        ws_urls = [
+            f'wss://{edge["address"]}/storm/v2/{edge.get("appName") or "live"}'
+            for edge in traverse_obj(page_props, ('serverData', 'streamServers', 'EDGE', lambda _, v: v['address']))]
+        for ws_url in ws_urls:
             try:
                 with ShowupStormSession(self._downloader, ws_url) as session:
                     subscription = session.subscribe(alias_stream_key)
                 break
             except RequestError as e:
-                self.report_warning(f'Unable to connect to {edge["address"]}: {e.msg}')
+                self.report_warning(f'Unable to connect to {ws_url}: {e.msg}')
         if not subscription:
             raise ExtractorError(
                 'Unable to connect to any stream server. A custom --user-agent that does not look '
@@ -99,6 +101,7 @@ class ShowupTvIE(InfoExtractor):
             'downloader_options': {
                 'stream_key': stream['streamKey'],
                 'subscription_key': alias_stream_key,
+                'fallback_urls': ws_urls,
             },
             **traverse_obj(stream, {
                 'format_id': ('streamInfo', 'label', {str}),

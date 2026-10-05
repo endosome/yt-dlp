@@ -114,6 +114,8 @@ class ShowupLiveFD(FileDownloader):
         tmpfilename = self.temp_name(filename)
         self.report_destination(filename)
 
+        # Connect before creating the file, so that nothing is left behind if no server is reachable
+        session = self._open_session(info_dict, opts)
         start_time = last_ping = last_progress = time.time()
         byte_count = 0
         stream, tmpfilename = sanitize_open(tmpfilename, 'wb')
@@ -131,9 +133,7 @@ class ShowupLiveFD(FileDownloader):
             }, info_dict)
 
         try:
-            with ShowupStormSession(self.ydl, info_dict['url']) as session:
-                session.subscribe(opts['subscription_key'])
-                session.play(opts['stream_key'], opts['subscription_key'])
+            with session:
                 while True:
                     message = session.recv()
                     if isinstance(message, bytes):
@@ -174,6 +174,25 @@ class ShowupLiveFD(FileDownloader):
             byte_count = self.filesize_or_none(filename) or byte_count
         hook_progress('finished')
         return True
+
+    def _open_session(self, info_dict, opts):
+        # Try the other edge servers if one is unreachable. This is only possible before
+        # any media is received; a new connection starts with a new init segment and timestamps
+        ws_urls = list(dict.fromkeys([info_dict['url'], *opts.get('fallback_urls', [])]))
+        for i, ws_url in enumerate(ws_urls):
+            try:
+                session = ShowupStormSession(self.ydl, ws_url)
+                try:
+                    session.subscribe(opts['subscription_key'])
+                    session.play(opts['stream_key'], opts['subscription_key'])
+                except BaseException:
+                    session.close()
+                    raise
+                return session
+            except RequestError as e:
+                if i == len(ws_urls) - 1:
+                    raise
+                self.report_warning(f'Unable to connect to {ws_url}: {e.msg}. Trying the next server')
 
     def _make_seekable(self, filename):
         # The raw fragmented MP4 has no global index or duration, so players cannot seek in it
