@@ -1,7 +1,7 @@
 from .common import InfoExtractor
 from ..dependencies import websockets
 from ..downloader.showup import ShowupStormSession
-from ..networking.exceptions import RequestError
+from ..networking.exceptions import HTTPError, RequestError
 from ..utils import ExtractorError, UserNotLive, int_or_none, str_or_none, url_or_none
 from ..utils.traversal import traverse_obj
 
@@ -48,9 +48,17 @@ class ShowupTvIE(InfoExtractor):
         if not websockets:
             raise ExtractorError('The websockets library is required to download showup.tv streams', expected=True)
 
-        # Cloudflare rejects non-browser clients; this needs curl_cffi
-        webpage = self._download_webpage(
-            f'https://showup.tv/{username}', username, impersonate=True, expected_status=404)
+        # Cloudflare rejects non-browser clients with a 403
+        try:
+            webpage = self._download_webpage(
+                f'https://showup.tv/{username}', username, impersonate=True, require_impersonation=True,
+                expected_status=404)
+        except ExtractorError as e:
+            if isinstance(e.cause, HTTPError) and e.cause.status == 403:
+                raise ExtractorError(
+                    'Blocked by Cloudflare (HTTP 403). Do not use a custom --user-agent, and if you use cookies, '
+                    'try removing the "cf_clearance" cookie from them', expected=True)
+            raise
         page_props = traverse_obj(self._search_nextjs_data(webpage, username), ('props', 'pageProps', {dict})) or {}
         broadcast_data = page_props.get('broadcastData') or {}
 
@@ -78,7 +86,9 @@ class ShowupTvIE(InfoExtractor):
             except RequestError as e:
                 self.report_warning(f'Unable to connect to {edge["address"]}: {e.msg}')
         if not subscription:
-            raise ExtractorError('Unable to connect to any stream server')
+            raise ExtractorError(
+                'Unable to connect to any stream server. A custom --user-agent that does not look '
+                'like a browser can cause this', expected=True)
         if subscription.get('streamState') != 'PUBLISHED':
             raise UserNotLive(video_id=username)
 
