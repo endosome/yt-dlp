@@ -1,10 +1,12 @@
 import json
+import os
 import time
 
 from .common import FileDownloader
 from ..networking import Request
 from ..networking.exceptions import RequestError
-from ..utils import ExtractorError, sanitize_open
+from ..postprocessor.ffmpeg import FFmpegPostProcessor
+from ..utils import ExtractorError, PostProcessingError, prepend_extension, sanitize_open
 
 PING_INTERVAL = 30
 
@@ -167,5 +169,20 @@ class ShowupLiveFD(FileDownloader):
             return False
 
         self.try_rename(tmpfilename, filename)
+        if filename != '-':
+            self._make_seekable(filename)
+            byte_count = self.filesize_or_none(filename) or byte_count
         hook_progress('finished')
         return True
+
+    def _make_seekable(self, filename):
+        # The raw fragmented MP4 has no global index or duration, so players cannot seek in it
+        temp_filename = prepend_extension(filename, 'temp')
+        self.to_screen(f'[showup.tv] Remuxing "{filename}" to make it seekable')
+        try:
+            pp = FFmpegPostProcessor(self.ydl)
+            pp.run_ffmpeg(filename, temp_filename, [*pp.stream_copy_opts(ext='mp4'), '-movflags', '+faststart'])
+            os.replace(temp_filename, filename)
+        except PostProcessingError as e:
+            self.try_remove(temp_filename)
+            self.report_warning(f'Unable to remux the file, it will not be seekable: {e}')
