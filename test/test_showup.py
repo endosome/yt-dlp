@@ -238,10 +238,10 @@ def profile_page(load_state='ONLINE', address_type='PUB', alias=ALIAS_KEY, edges
 class TestShowupExtractor:
     @pytest.fixture
     def extract(self, monkeypatch):
-        def extract(webpage, **kwargs):
+        def extract(webpage, url='https://showup.tv/some_user'):
             ie = ShowupTvIE(FakeYDL())
             monkeypatch.setattr(ie, '_download_webpage', lambda *a, **kw: webpage)
-            return ie._real_extract('https://showup.tv/some_user')
+            return ie._real_extract(url)
         return extract
 
     @pytest.fixture
@@ -283,6 +283,13 @@ class TestShowupExtractor:
                 'wss://edge2.example.com/storm/v2/live',
             ],
         }
+
+    def test_username_case_is_canonicalised(self, extract, fake_server):
+        # The URL in `extract` is lowercase, the page has the canonical casing
+        page = profile_page().replace('some_user', 'Some_User')
+        info = extract(page, url='https://showup.tv/some_user')
+        assert (info['id'], info['uploader_id'], info['uploader_url']) == (
+            'Some_User', 'Some_User', 'https://showup.tv/Some_User')
 
     def test_offline(self, extract):
         with pytest.raises(UserNotLive):
