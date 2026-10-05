@@ -94,6 +94,9 @@ class ShowupTvIE(InfoExtractor):
         if subscription.get('streamState') != 'PUBLISHED':
             raise UserNotLive(video_id=username)
 
+        # How long to wait for the stream to come back when it is interrupted, e.g. by a private show request
+        resume_timeout = max(int_or_none(self._configuration_arg('resume_timeout', ['60'])[0], default=60), 0)
+
         formats = [{
             'url': ws_url,
             'ext': 'mp4',
@@ -105,6 +108,7 @@ class ShowupTvIE(InfoExtractor):
                 'stream_key': stream['streamKey'],
                 'subscription_key': alias_stream_key,
                 'fallback_urls': ws_urls,
+                'resume_timeout': resume_timeout,
             },
             **traverse_obj(stream, {
                 'format_id': ('streamInfo', 'label', {str}),

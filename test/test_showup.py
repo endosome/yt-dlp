@@ -8,7 +8,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import contextlib
 import json
+import pathlib
+import shutil
 import socket
+import subprocess
 import threading
 import time
 
@@ -33,7 +36,8 @@ pytestmark = pytest.mark.skipif(not (websockets and serve), reason='websockets i
 
 STREAM_KEY = 'streamkey'
 ALIAS_KEY = 'aliaskey'
-FRAMES = [b'\x00\x00\x00\x08ftyp', b'moov-bytes', b'moof-mdat-1', b'moof-mdat-2']
+INIT = b'\x00\x00\x00\x08ftyp'
+FRAMES = [INIT, b'moov-bytes', b'moof-mdat-1', b'moof-mdat-2']
 
 
 def storm_server(play_status='success', stream_state='PUBLISHED', frames=FRAMES, after_play=None):
@@ -89,10 +93,11 @@ def unused_port():
         return s.getsockname()[1]
 
 
-def download(tmp_path, url, ydl_params=None, **options):
+def download(tmp_path, url, ydl_params=None, real_remux=False, **options):
     ydl = YoutubeDL({'quiet': True, 'noprogress': True, 'nopart': True, **(ydl_params or {})})
     filename = str(tmp_path / 'out.mp4')
     info_dict = {
+        'format_id': '720p',
         'id': 'test',
         'url': url,
         'ext': 'mp4',
@@ -101,8 +106,9 @@ def download(tmp_path, url, ydl_params=None, **options):
         'downloader_options': {'stream_key': STREAM_KEY, 'subscription_key': ALIAS_KEY, **options},
     }
     fd = ShowupLiveFD(ydl, ydl.params)
-    # Remuxing needs ffmpeg and a real MP4
-    fd._make_seekable = lambda filename: None
+    if not real_remux:
+        # Remuxing needs ffmpeg and a real MP4
+        fd._make_seekable = lambda filename: None
     return fd.download(filename, info_dict), filename
 
 
@@ -180,6 +186,121 @@ class TestShowupDownloader:
         result, _ = download(tmp_path, f'ws://127.0.0.1:{port}')
         assert result
         assert 'ping' in [p['packetId'] for p in received]
+
+    def test_waits_through_an_interruption(self, tmp_path):
+        # The stream is briefly unpublished (e.g. a private show request) and then comes back
+        def after_play(ws, send):
+            ws.send(INIT + b'part1')
+            send(ws, 'subscribeUpdate', {'streamKey': ALIAS_KEY, 'streamState': 'UNPUBLISHED'})
+            time.sleep(0.3)
+            send(ws, 'subscribeUpdate', {'streamKey': ALIAS_KEY, 'streamState': 'PUBLISHED'})
+            ws.recv()  # the new play request
+            send(ws, 'playResult', {'status': 'success', 'streamState': 'PUBLISHED'})
+            ws.send(INIT + b'part2')
+            send(ws, 'subscribeUpdate', {'streamKey': ALIAS_KEY, 'streamState': 'CLOSED'})
+
+        port, _ = storm_server(after_play=after_play)
+        joined = []
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(ShowupLiveFD, '_join_parts', lambda self, paths, filename: joined.append(paths))
+            result, _ = download(tmp_path, f'ws://127.0.0.1:{port}', resume_timeout=5)
+        assert result
+        # Every part has its own file, so that the restarted timestamps don't clash
+        assert [pathlib.Path(p).read_bytes() for p in joined[0]] == [INIT + b'part1', INIT + b'part2']
+
+    def test_gives_up_when_the_stream_does_not_come_back(self, tmp_path):
+        def after_play(ws, send):
+            ws.send(FRAMES[0])
+            send(ws, 'subscribeUpdate', {'streamKey': ALIAS_KEY, 'streamState': 'UNPUBLISHED'})
+            for _ in range(15):  # the server keeps sending progress packets, as the real one does
+                send(ws, 'playbackProgress', {})
+                time.sleep(0.2)
+
+        port, _ = storm_server(after_play=after_play)
+        start = time.time()
+        result, filename = download(tmp_path, f'ws://127.0.0.1:{port}', resume_timeout=1)
+        assert 1 <= time.time() - start < 2.5
+        assert result
+        assert pathlib.Path(filename).read_bytes() == FRAMES[0]
+
+    def test_reconnects_after_the_connection_is_lost(self, tmp_path):
+        connections = []
+
+        def after_play(ws, send):
+            connections.append(ws)
+            if len(connections) == 1:
+                ws.send(INIT + b'part1')
+                ws.close()
+            else:
+                ws.send(INIT + b'part2')
+                send(ws, 'subscribeUpdate', {'streamKey': ALIAS_KEY, 'streamState': 'CLOSED'})
+
+        port, _ = storm_server(after_play=after_play)
+        joined = []
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(ShowupLiveFD, '_join_parts', lambda self, paths, filename: joined.append(paths))
+            result, _ = download(tmp_path, f'ws://127.0.0.1:{port}', resume_timeout=10)
+        assert result
+        assert len(connections) == 2
+        assert [pathlib.Path(p).read_bytes() for p in joined[0]] == [INIT + b'part1', INIT + b'part2']
+
+    def test_no_reconnect_without_resume_timeout(self, tmp_path):
+        connections = []
+
+        def after_play(ws, send):
+            connections.append(ws)
+            ws.send(FRAMES[0])
+            ws.close()
+
+        port, _ = storm_server(after_play=after_play)
+        result, filename = download(tmp_path, f'ws://127.0.0.1:{port}')
+        assert result
+        assert len(connections) == 1
+        assert pathlib.Path(filename).read_bytes() == FRAMES[0]
+
+    @pytest.mark.skipif(not shutil.which('ffmpeg'), reason='ffmpeg is not installed')
+    def test_joins_real_parts(self, tmp_path):
+        parts = []
+        for i in range(2):
+            part = tmp_path / f'part{i}.mp4'
+            if subprocess.run([
+                    'ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=duration=2:size=64x64:rate=10',
+                    '-f', 'lavfi', '-i', 'sine=duration=2', '-c:v', 'libx264', '-c:a', 'aac',
+                    '-movflags', 'frag_keyframe+empty_moov', str(part)]).returncode:
+                pytest.skip('ffmpeg cannot encode the test video')
+            parts.append(part.read_bytes())
+
+        def after_play(ws, send):
+            ws.send(parts[0])
+            send(ws, 'subscribeUpdate', {'streamKey': ALIAS_KEY, 'streamState': 'UNPUBLISHED'})
+            send(ws, 'subscribeUpdate', {'streamKey': ALIAS_KEY, 'streamState': 'PUBLISHED'})
+            ws.recv()
+            send(ws, 'playResult', {'status': 'success', 'streamState': 'PUBLISHED'})
+            ws.send(parts[1])
+            send(ws, 'subscribeUpdate', {'streamKey': ALIAS_KEY, 'streamState': 'CLOSED'})
+
+        port, _ = storm_server(after_play=after_play)
+        out = tmp_path / 'out'
+        out.mkdir()
+        result, filename = download(out, f'ws://127.0.0.1:{port}', resume_timeout=5, real_remux=True)
+        assert result
+        duration = float(subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', filename],
+            capture_output=True, text=True, check=True).stdout)
+        assert 3.5 < duration < 4.5
+        assert [p.name for p in out.iterdir()] == ['out.mp4']
+
+    def test_selects_the_stream_by_label_when_keys_change(self):
+        subscription = {'streamList': [
+            {'streamKey': 'new_720', 'streamInfo': {'label': '720p'}},
+            {'streamKey': 'new_480', 'streamInfo': {'label': '480p'}},
+        ]}
+        select = ShowupLiveFD._select_stream_key
+        opts = {'stream_key': 'old_480'}
+        assert select(subscription, {'format_id': '480p'}, opts) == 'new_480'
+        assert select(subscription, {'format_id': '1080p'}, opts) == 'old_480'
+        assert select({'streamList': [{'streamKey': 'old_480'}]}, {'format_id': '480p'}, opts) == 'old_480'
+        assert select(None, {'format_id': '480p'}, opts) == 'old_480'
 
     def test_falls_back_to_next_server(self, tmp_path):
         port, _ = storm_server()
@@ -282,7 +403,15 @@ class TestShowupExtractor:
                 'wss://edge1.example.com/storm/v2/live',
                 'wss://edge2.example.com/storm/v2/live',
             ],
+            'resume_timeout': 60,
         }
+
+    @pytest.mark.parametrize(('arg', 'expected'), [('0', 0), ('15', 15), ('-5', 0), ('abc', 60)])
+    def test_resume_timeout_argument(self, extract, fake_server, arg, expected):
+        ie = ShowupTvIE(FakeYDL({'extractor_args': {'showuptv': {'resume_timeout': [arg]}}}))
+        ie._download_webpage = lambda *a, **kw: profile_page()
+        info = ie._real_extract('https://showup.tv/some_user')
+        assert info['formats'][0]['downloader_options']['resume_timeout'] == expected
 
     def test_username_case_is_canonicalised(self, extract, fake_server):
         # The URL in `extract` is lowercase, the page has the canonical casing
