@@ -32,6 +32,7 @@ from .ism import IsmFD
 from .mhtml import MhtmlFD
 from .niconico import NiconicoLiveFD
 from .rtmp import RtmpFD
+from .showup import ShowupLiveFD
 from .websocket import WebSocketFragmentFD
 from .youtube_live_chat import YoutubeLiveChatFD
 from .bunnycdn import BunnyCdnFD
@@ -55,6 +56,7 @@ PROTOCOL_MAP = {
     'youtube_live_chat_replay': YoutubeLiveChatFD,
     'bunnycdn': BunnyCdnFD,
     'soopvod': SoopVodFD,
+    'showup_live': ShowupLiveFD,
 }
 
 
