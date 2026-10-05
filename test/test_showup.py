@@ -6,15 +6,18 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import contextlib
 import json
 import socket
 import threading
+import time
 
 import pytest
 
 from test.helper import FakeYDL
 from yt_dlp import YoutubeDL
 from yt_dlp.dependencies import websockets
+from yt_dlp.downloader import showup
 from yt_dlp.downloader.showup import ShowupLiveFD, ShowupStormSession
 from yt_dlp.extractor import showuptv
 from yt_dlp.extractor.showuptv import ShowupTvIE
@@ -33,8 +36,11 @@ ALIAS_KEY = 'aliaskey'
 FRAMES = [b'\x00\x00\x00\x08ftyp', b'moov-bytes', b'moof-mdat-1', b'moof-mdat-2']
 
 
-def storm_server(play_status='success', stream_state='PUBLISHED', frames=FRAMES):
-    """A fake Storm v2 server. Returns (port, list of received packets)"""
+def storm_server(play_status='success', stream_state='PUBLISHED', frames=FRAMES, after_play=None):
+    """A fake Storm v2 server. Returns (port, list of received packets)
+
+    after_play(ws, send) replaces the default stream of frames followed by playbackStop
+    """
     received = []
 
     def send(ws, packet_id, data):
@@ -64,6 +70,8 @@ def storm_server(play_status='success', stream_state='PUBLISHED', frames=FRAMES)
                 send(ws, 'playResult', {'streamKey': packet['data']['streamKey'], 'streamState': stream_state, 'status': play_status})
                 if play_status != 'success' or stream_state != 'PUBLISHED':
                     return
+                if after_play:
+                    return after_play(ws, send)
                 for frame in frames:
                     send(ws, 'playbackProgress', {})  # text frames must not end up in the file
                     ws.send(frame)
@@ -81,8 +89,8 @@ def unused_port():
         return s.getsockname()[1]
 
 
-def download(tmp_path, url, **options):
-    ydl = YoutubeDL({'quiet': True, 'noprogress': True, 'nopart': True})
+def download(tmp_path, url, ydl_params=None, **options):
+    ydl = YoutubeDL({'quiet': True, 'noprogress': True, 'nopart': True, **(ydl_params or {})})
     filename = str(tmp_path / 'out.mp4')
     info_dict = {
         'id': 'test',
@@ -119,6 +127,59 @@ class TestShowupDownloader:
         play = next(p for p in received if p['packetId'] == 'playRequest')['data']
         assert play == {
             'streamKey': STREAM_KEY, 'subscriptionKey': ALIAS_KEY, 'packetizer': 'mse', 'accessPoint': 0}
+
+    def test_connection_closed_without_stop_packet(self, tmp_path):
+        def after_play(ws, send):
+            for frame in FRAMES:
+                ws.send(frame)
+            ws.close()
+
+        port, _ = storm_server(after_play=after_play)
+        result, filename = download(tmp_path, f'ws://127.0.0.1:{port}')
+        assert result
+        with open(filename, 'rb') as f:
+            assert f.read() == b''.join(FRAMES)
+
+    def test_stream_unpublished_midway(self, tmp_path):
+        def after_play(ws, send):
+            ws.send(FRAMES[0])
+            send(ws, 'subscribeUpdate', {'streamState': 'UNPUBLISHED'})
+            ws.send(b'must-not-be-written')
+            time.sleep(0.5)
+
+        port, _ = storm_server(after_play=after_play)
+        result, filename = download(tmp_path, f'ws://127.0.0.1:{port}')
+        assert result
+        with open(filename, 'rb') as f:
+            assert f.read() == FRAMES[0]
+
+    def test_stalled_connection_keeps_what_was_received(self, tmp_path):
+        def after_play(ws, send):
+            ws.send(FRAMES[0])
+            time.sleep(3)
+
+        port, _ = storm_server(after_play=after_play)
+        result, filename = download(tmp_path, f'ws://127.0.0.1:{port}', ydl_params={'socket_timeout': 1})
+        assert result
+        with open(filename, 'rb') as f:
+            assert f.read() == FRAMES[0]
+
+    def test_sends_ping_while_streaming(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(showup, 'PING_INTERVAL', 0.1)
+
+        def after_play(ws, send):
+            for frame in FRAMES:
+                ws.send(frame)
+                time.sleep(0.2)
+            # Pick up what the client sent while we were busy
+            with contextlib.suppress(TimeoutError):
+                while True:
+                    received.append(json.loads(ws.recv(timeout=0.3)))
+
+        port, received = storm_server(after_play=after_play)
+        result, _ = download(tmp_path, f'ws://127.0.0.1:{port}')
+        assert result
+        assert 'ping' in [p['packetId'] for p in received]
 
     def test_falls_back_to_next_server(self, tmp_path):
         port, _ = storm_server()
