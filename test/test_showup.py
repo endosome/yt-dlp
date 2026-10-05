@@ -213,6 +213,7 @@ class TestShowupExtractor:
         assert (formats['720p']['width'], formats['720p']['height'], formats['720p'].get('tbr')) == (1280, 720, None)
         assert formats['480p']['tbr'] == 1464
         assert formats['480p']['protocol'] == 'showup_live'
+        assert (formats['480p']['vcodec'], formats['480p']['acodec']) == ('avc1', 'mp4a.40.2')
         assert formats['480p']['downloader_options'] == {
             'stream_key': f'{STREAM_KEY}_480p',
             'subscription_key': ALIAS_KEY,
