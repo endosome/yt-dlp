@@ -597,7 +597,7 @@ class FacebookIE(InfoExtractor):
         if not video_data:
             data = extract_relay_prefetched_data(
                 r'"(?:dash_manifest|playable_url(?:_quality_hd)?)',
-                target_keys=('video', 'event', 'nodes', 'node', 'mediaset'))
+                target_keys=('video', 'event', 'nodes', 'node', 'node_v2', 'mediaset'))
             if data:
                 entries = []
 
@@ -708,7 +708,7 @@ class FacebookIE(InfoExtractor):
                     if media.get('__typename') == 'Video':
                         return parse_graphql_video(media)
 
-                nodes = variadic(traverse_obj(data, 'nodes', 'node') or [])
+                nodes = variadic(traverse_obj(data, 'nodes', 'node', 'node_v2') or [])
                 attachments = traverse_obj(nodes, (
                     ..., 'comet_sections', 'content', 'story', (None, 'attached_story'), 'attachments',
                     ..., ('styles', 'style_type_renderer', ('throwbackStyles', 'attachment_target_renderer')),
