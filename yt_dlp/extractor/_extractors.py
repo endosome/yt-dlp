@@ -1841,6 +1841,10 @@ from .storyfire import (
     StoryFireSeriesIE,
     StoryFireUserIE,
 )
+from .storytel import (
+    StorytelIE,
+    StorytelListIE,
+)
 from .streaks import StreaksIE
 from .streamable import StreamableIE
 from .streamcz import StreamCZIE
