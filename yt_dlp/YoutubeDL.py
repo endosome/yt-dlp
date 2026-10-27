@@ -3636,7 +3636,7 @@ class YoutubeDL:
                     downloader = downloader.FD_NAME if downloader else None
 
                     ext = info_dict.get('ext')
-                    postprocessed_by_ffmpeg = info_dict.get('requested_formats') or any((
+                    postprocessed_by_ffmpeg = (info_dict.get('requested_formats') and fd != FFmpegFD) or any((
                         isinstance(pp, FFmpegVideoConvertorPP)
                         and resolve_recode_mapping(ext, pp.mapping)[0] not in (ext, None)
                     ) for pp in self._pps['post_process'])
