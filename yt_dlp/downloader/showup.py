@@ -1,6 +1,8 @@
 import contextlib
 import json
 import os
+import queue
+import threading
 import time
 
 from .common import FileDownloader
@@ -107,32 +109,62 @@ class ShowupStormSession:
 class _SegmentWriter:
     """
     Writes media frames to a file. A new init segment (ftyp box) starts a new file,
-    because a restarted stream has its own timestamps and must not be appended to the previous one
+    because a restarted stream has its own timestamps and must not be appended to the previous one.
+
+    The frames are written in a separate thread, so that a slow disk does not stop the connection from being read:
+    while it isn't read, the keepalive pings are not answered and the connection is dropped
     """
 
     def __init__(self, filename):
         self._filename = filename
         self._stream = None
         self._written = 0
+        self._error = None
+        self._queue = queue.Queue()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
         self.paths = []
 
     def write(self, frame):
+        if self._error:
+            raise self._error
+        self._queue.put(frame)
+
+    def _run(self):
+        while (frame := self._queue.get()) is not None:
+            if self._error:
+                continue
+            try:
+                self._write(frame)
+            except Exception as e:
+                self._error = e
+
+    def _write(self, frame):
         if self._stream is None or (self._written and self._filename != '-' and frame[4:8] == b'ftyp'):
             self._next_file()
         self._stream.write(frame)
         self._written += len(frame)
 
     def _next_file(self):
-        self.close()
+        self._close_stream()
         self._stream, path = sanitize_open(
             f'{self._filename}.{len(self.paths)}' if self.paths else self._filename, 'wb')
         self.paths.append(path)
         self._written = 0
 
-    def close(self):
+    def _close_stream(self):
         if self._stream:
             self._stream.close()
             self._stream = None
+
+    def close(self):
+        """Waits until everything has been written"""
+        if self._thread.is_alive():
+            self._queue.put(None)
+            self._thread.join()
+        self._close_stream()
+        if self._error:
+            raise self._error
 
 
 class ShowupLiveFD(FileDownloader):
@@ -231,9 +263,9 @@ class ShowupLiveFD(FileDownloader):
                 raise
             self.to_screen('Interrupted by user')
         finally:
-            writer.close()
             if session:
                 session.close()
+            writer.close()
 
         if not byte_count:
             for path in writer.paths:

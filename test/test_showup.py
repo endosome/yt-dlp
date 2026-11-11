@@ -7,6 +7,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import contextlib
+import functools
 import json
 import pathlib
 import shutil
@@ -28,6 +29,7 @@ from yt_dlp.networking.exceptions import RequestError
 from yt_dlp.utils import DownloadError, ExtractorError, UserNotLive
 
 try:
+    import websockets.sync.client
     from websockets.sync.server import serve
 except ImportError:
     serve = None
@@ -278,6 +280,42 @@ class TestShowupDownloader:
         assert result
         assert len(connections) == 2
         assert [pathlib.Path(p).read_bytes() for p in joined[0]] == [INIT + b'part1', INIT + b'part2']
+
+    def test_slow_disk_does_not_drop_the_connection(self, tmp_path, monkeypatch):
+        # While the connection isn't read, keepalive pongs go unnoticed and the connection is dropped
+        connect = websockets.sync.client.connect
+        monkeypatch.setattr(websockets.sync.client, 'connect', functools.partial(connect, ping_interval=0.2, ping_timeout=0.2))
+        write = showup._SegmentWriter._write
+        writes = []
+
+        def slow_write(self, frame):
+            writes.append(frame)
+            if len(writes) == 2:
+                time.sleep(1.5)
+            write(self, frame)
+
+        monkeypatch.setattr(showup._SegmentWriter, '_write', slow_write)
+        frames = [INIT, *(b'frame%d' % i for i in range(40))]
+        connections = []
+
+        def after_play(ws, send):
+            connections.append(ws)
+            for frame in frames:
+                ws.send(frame)
+                time.sleep(0.05)
+            send(ws, 'subscribeUpdate', {'streamKey': ALIAS_KEY, 'streamState': 'CLOSED'})
+
+        port, _ = storm_server(after_play=after_play)
+        result, filename = download(tmp_path, f'ws://127.0.0.1:{port}', resume_timeout=10)
+        assert result
+        assert len(connections) == 1
+        assert pathlib.Path(filename).read_bytes() == b''.join(frames)
+
+    def test_write_errors_are_raised(self, tmp_path):
+        writer = showup._SegmentWriter(str(tmp_path / 'missing_dir' / 'out.mp4'))
+        writer.write(INIT)
+        with pytest.raises(OSError):
+            writer.close()
 
     def test_no_reconnect_without_resume_timeout(self, tmp_path):
         connections = []
