@@ -23,6 +23,7 @@ Original task: implement showup.tv starting from the 2022 PR yt-dlp/yt-dlp#3237.
 | 11534f082 | Keep recording through interruptions (private-show request): wait, request playback again, reconnect, join parts |
 | da9308096 | Don't abort when the connection is lost right before our ping (keepalive timeout) |
 | 469d21908 | Report lost connections without `-v` |
+| e993e2a0a | Write to disk in a separate thread (slow disk dropped the connection) |
 
 ## Files
 
@@ -75,7 +76,9 @@ The user reported `websockets: keepalive ping failed ... ConnectionClosedError: 
 - **Two causes reproduced:** (a) the network stops delivering for over 20 s; (b) the downloader's main thread blocks for over 20 s (e.g. a slow disk write). In case (b) the library's reader stops reading once 16 frames are queued (flow control), so the pong is never seen and a **healthy** connection is killed.
 - **Bug fixed (da9308096):** after the library closes the connection, `recv()` still returns the queued messages; if our own ping fell due then, `session.ping()` raised and aborted the download. A failed ping is now ignored, and the next `recv()` raises and triggers the reconnect. Regression test `test_reconnects_when_the_ping_fails`. Moving the ping before `recv()` was tried and is wrong: it drops a queued final `CLOSED` and causes needless reconnects.
 - 469d21908: a lost connection is now reported at normal verbosity (`Connection lost (...); trying to reconnect`).
-- Footage between the stall and the reconnect is lost. The cause in the user's case is unknown; a log line after the traceback and the output path (a Windows drive under WSL?) would tell which case applied.
+- Footage between the stall and the reconnect is lost.
+- **User's case:** the download *hung* after the traceback, writing to a Windows drive under WSL on a loaded machine, so cause (b). e993e2a0a writes frames in a separate thread (`_SegmentWriter`, unbounded queue), so a slow disk no longer stops the connection being read; test `test_slow_disk_does_not_drop_the_connection` fails with synchronous writes. The hang itself was most likely the main thread blocked on the disk; this is not proven, since no `-v` log exists. If it recurs, ask for a `-v` log.
+- A silent but open connection does **not** hang: yt-dlp passes its own socket with `socket_timeout` set, and that timeout stays in effect after the handshake (reader thread gets `TimeoutError`). A no-data watchdog was tried and dropped as redundant; e0191a4f3 makes the test actually check this. `wait_for()` would still loop forever if the server kept sending other packets but never the expected reply (never seen).
 
 ## States (observed)
 
