@@ -21,6 +21,8 @@ Original task: implement showup.tv starting from the 2022 PR yt-dlp/yt-dlp#3237.
 | 93e61095d | Tests for how streams end, plus the keep-alive ping |
 | 7f00db055 | Use the canonical username from the page for `id`/`uploader_id` (URLs are case-insensitive) |
 | 11534f082 | Keep recording through interruptions (private-show request): wait, request playback again, reconnect, join parts |
+| da9308096 | Don't abort when the connection is lost right before our ping (keepalive timeout) |
+| 469d21908 | Report lost connections without `-v` |
 
 ## Files
 
@@ -66,6 +68,14 @@ Original task: implement showup.tv starting from the 2022 PR yt-dlp/yt-dlp#3237.
   - If joining fails, the parts are kept as `name.mp4` and `name.part2.mp4`, ... with a warning. With `--no-part` the first part is the output file itself (a bug here once deleted the result; there is a regression test).
   - Not resumable when writing to stdout (`-o -`).
   - **Unobserved:** what the real server sends when a private request is pending. A private request cannot be triggered without an account. The behaviour is built from the player JS plus tests against a fake server, and the reconnect-and-join path was exercised on the real server by dropping the connection mid-recording. If a real private request still breaks a recording, run with `-v` (the downloader logs `Stream state: ...`, `Playback stopped by the server` and `Connection lost: ...`) and compare with the logic in `ShowupLiveFD.real_download`.
+
+## Keepalive ping timeouts (2026-11-11)
+
+The user reported `websockets: keepalive ping failed ... ConnectionClosedError: sent 1011 (internal error) keepalive ping timeout`. That traceback is printed by the websockets library's own keepalive thread (ping every 20 s, 20 s timeout, set by the library; yt-dlp doesn't pass these). It is logged at ERROR level through yt-dlp's generic `_websockets.py` handler, the same for every WebSocket site, and was deliberately left alone. The extra `TimeoutError` in the chain comes from yt-dlp's `close_timeout=0`.
+- **Two causes reproduced:** (a) the network stops delivering for over 20 s; (b) the downloader's main thread blocks for over 20 s (e.g. a slow disk write). In case (b) the library's reader stops reading once 16 frames are queued (flow control), so the pong is never seen and a **healthy** connection is killed.
+- **Bug fixed (da9308096):** after the library closes the connection, `recv()` still returns the queued messages; if our own ping fell due then, `session.ping()` raised and aborted the download. A failed ping is now ignored, and the next `recv()` raises and triggers the reconnect. Regression test `test_reconnects_when_the_ping_fails`. Moving the ping before `recv()` was tried and is wrong: it drops a queued final `CLOSED` and causes needless reconnects.
+- 469d21908: a lost connection is now reported at normal verbosity (`Connection lost (...); trying to reconnect`).
+- Footage between the stall and the reconnect is lost. The cause in the user's case is unknown; a log line after the traceback and the output path (a Windows drive under WSL?) would tell which case applied.
 
 ## States (observed)
 
