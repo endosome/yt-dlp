@@ -182,7 +182,10 @@ class ShowupLiveFD(FileDownloader):
                     if not byte_count:
                         raise
                     # The server closes the connection when the broadcast ends
-                    self.write_debug(f'Connection lost: {e}')
+                    if resume_timeout:
+                        self.to_screen(f'[showup.tv] Connection lost ({e.msg}); trying to reconnect')
+                    else:
+                        self.write_debug(f'Connection lost: {e}')
                     session.close()
                     interrupted_at = interrupted_at or time.time()
                     session = self._reconnect(info_dict, opts, interrupted_at + resume_timeout)
