@@ -164,10 +164,13 @@ class TestShowupDownloader:
     def test_stalled_connection_keeps_what_was_received(self, tmp_path):
         def after_play(ws, send):
             ws.send(FRAMES[0])
-            time.sleep(3)
+            time.sleep(30)  # the connection stays open, but nothing is sent
 
         port, _ = storm_server(after_play=after_play)
+        start = time.time()
         result, filename = download(tmp_path, f'ws://127.0.0.1:{port}', ydl_params={'socket_timeout': 1})
+        # The socket timeout still applies after the WebSocket handshake, so recv() doesn't block forever
+        assert time.time() - start < 15
         assert result
         with open(filename, 'rb') as f:
             assert f.read() == FRAMES[0]
