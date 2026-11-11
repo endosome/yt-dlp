@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import time
@@ -215,7 +216,9 @@ class ShowupLiveFD(FileDownloader):
                 if interrupted_at and now - interrupted_at >= resume_timeout:
                     break
                 if now - last_ping >= PING_INTERVAL:
-                    session.ping()
+                    # If the connection was lost, recv() reports it once the queued messages are read
+                    with contextlib.suppress(RequestError):
+                        session.ping()
                     last_ping = now
                 if now - last_progress >= 0.5:
                     hook_progress('downloading')

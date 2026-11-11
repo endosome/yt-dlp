@@ -244,6 +244,41 @@ class TestShowupDownloader:
         assert len(connections) == 2
         assert [pathlib.Path(p).read_bytes() for p in joined[0]] == [INIT + b'part1', INIT + b'part2']
 
+    def test_reconnects_when_the_ping_fails(self, tmp_path, monkeypatch):
+        # The connection can be lost (e.g. by a keepalive timeout) while messages are still queued,
+        # in which case sending the ping is what fails first
+        monkeypatch.setattr(showup, 'PING_INTERVAL', 0)
+        ping = ShowupStormSession.ping
+        pings = []
+
+        def ping_after_connection_loss(self):
+            pings.append(self)
+            if len(pings) == 2:
+                self.close()
+            ping(self)
+
+        monkeypatch.setattr(ShowupStormSession, 'ping', ping_after_connection_loss)
+        connections = []
+
+        def after_play(ws, send):
+            connections.append(ws)
+            ws.send(INIT + f'part{len(connections)}'.encode())
+            if len(connections) == 1:
+                for _ in range(50):
+                    send(ws, 'playbackProgress', {})
+                    time.sleep(0.1)
+            else:
+                send(ws, 'subscribeUpdate', {'streamKey': ALIAS_KEY, 'streamState': 'CLOSED'})
+
+        port, _ = storm_server(after_play=after_play)
+        joined = []
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(ShowupLiveFD, '_join_parts', lambda self, paths, filename: joined.append(paths))
+            result, _ = download(tmp_path, f'ws://127.0.0.1:{port}', resume_timeout=10)
+        assert result
+        assert len(connections) == 2
+        assert [pathlib.Path(p).read_bytes() for p in joined[0]] == [INIT + b'part1', INIT + b'part2']
+
     def test_no_reconnect_without_resume_timeout(self, tmp_path):
         connections = []
 
