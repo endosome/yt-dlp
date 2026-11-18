@@ -19,6 +19,7 @@ class ShowupStormSession:
 
     def __init__(self, ydl, ws_url):
         self._ws = ydl.urlopen(Request(ws_url))
+        self._timeout = ydl.params.get('socket_timeout')
         try:
             self._handshake(ydl)
         except BaseException:
@@ -72,7 +73,17 @@ class ShowupStormSession:
 
     def recv(self):
         """Returns binary media frames as bytes and control packets as (packet_id, data)"""
-        message = self._ws.recv()
+        # websockets>=17 doesn't apply the socket timeout after the handshake, so a silent connection would block
+        # forever; closing it from a timer makes recv() raise instead
+        watchdog = threading.Timer(self._timeout, self._ws.close) if self._timeout else None
+        if watchdog:
+            watchdog.daemon = True
+            watchdog.start()
+        try:
+            message = self._ws.recv()
+        finally:
+            if watchdog:
+                watchdog.cancel()
         if isinstance(message, bytes):
             return message
         packet = json.loads(message)
